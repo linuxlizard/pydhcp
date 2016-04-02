@@ -2,7 +2,10 @@
 
 # davep 07-Mar-2016 ; DHCP in Python for testing
 #
-# davep 15-Mar-2016 ; adding my old-old-old Python2 DHCP stuff
+# Never never never broadcast any packets. Only unicasts to a specific known
+# server IP address. Best effort taken to not disrupt normal network operations.
+#
+# davep 15-Mar-2016 ; integrated my Python2 DHCP stuff from 2003 (!)
 #
 # https://tools.ietf.org/html/rfc2131
 # https://tools.ietf.org/html/rfc2132
@@ -11,6 +14,7 @@ import struct
 import random
 import socket
 import logging
+import ipaddress
 
 logger = logging.getLogger("dhcp")
 
@@ -40,6 +44,7 @@ option_pad = 0
 subnet_mask = 1
 time_offset = 2
 router = 3
+time_server = 4
 domain_name_server = 6
 domain_name = 15
 broadcast_address = 28
@@ -103,14 +108,12 @@ class IP_Option(Option) :
     """DHCP Option containing a list of IP addresses."""
     def __init__(self, opcode, name, value=None) :
         super().__init__(opcode,name)
-        if value is not None and type(value) != type([]) :
-            if type(value) == type("string") :
-                value = [value]
-            else:
-                raise DHCPEncodeError("IP addresses must be a list or string not {}".format(type(value)))
 
-        # IP address is stored as an array of ready-to-use packed 32-bit binary in network byte order
-        self.value = value
+        # want an array of IPAddress instances so let's see how it quacks
+        if value is not None:
+            for v in value:
+                s = v.packed
+        self.value = value or []
 
     def __str__(self) :
         if len(self.value):
@@ -120,6 +123,12 @@ class IP_Option(Option) :
 
     def new(self,value=None) :
         return IP_Option( self.opcode, self.name, value )
+
+    def pack( self ) :
+        # remember there can be more than 1 IP address in here
+        self.packed_option = struct.pack( "!BB", self.opcode, len(self.value)*4) 
+        self.packed_option += b''.join(ip.packed for ip in self.value)
+        return self.packed_option
 
     def unpack(self,data) :
         # there can be more than 1 IP address in an option
@@ -135,13 +144,6 @@ class IP_Option(Option) :
             ip = data[dstart:dstart+4]
             self.value.append( ip )
             dstart = dstart + 4
-
-    def pack( self ) :
-        # remember there can be more than 1 IP address in here
-        self.packed_option = struct.pack( "!BB", self.opcode, len(self.value)*4) 
-        for ip in self.value :
-            self.packed_option = self.packed_option + ip 
-        return self.packed_option.encode("UTF-8")
 
 class Int_Option(Option) :
     """DHCP Option containing a 1, 2, or 4 byte integer."""
@@ -313,7 +315,6 @@ _option_table = {
                     2 : Int32_Option( 2, "time offset" ),
                     3 : IP_Option( 3, "router" ),
                     4 : IP_Option( 4, "time server" ),
-                    5 : IP_Option( 5, "name server" ),
                     6 : IP_Option( 6, "domain name server" ),
                     7 : IP_Option( 7, "log server" ),
                     8 : IP_Option( 8, "cookie server" ),
@@ -449,7 +450,9 @@ class Packet:
     htype = 1
     hlen = 6 # ethernet
 
-    fmt = ">BBBBLHHLLLL16s64s128s"
+    fmt = ">BBBBLHH4s4s4s4s16s64s128s"
+#    fmt = ">BBBBLHH16s16s64s128s"
+#    fmt = ">BBBBLHHLLLL16s64s128s"
 #    fmt = ">BBBBLHHLLLL16s64s128s312s"
 
     def __init__(self, **kwargs):
@@ -458,10 +461,10 @@ class Packet:
         self.xid = kwargs.get("xid") or random.randint(0,2**32-1)
         self.secs = 0
         self.flags = 0
-        self.ciaddr = 0
-        self.yiaddr = 0
-        self.siaddr = 0
-        self.giaddr = 0
+        self.ciaddr = ipaddress.ip_address(0)
+        self.yiaddr = ipaddress.ip_address(0)
+        self.siaddr = ipaddress.ip_address(0)
+        self.giaddr = ipaddress.ip_address(0)
         self.chaddr = kwargs.get("chaddr", b'')
         self.sname = ""
         self.bootfile = ""
@@ -480,8 +483,9 @@ class Packet:
                         # sHort (uint16) (two fields)
                         self.secs, self.flags,
 
-                        # Long (uint32) (four IP addresses)
-                        self.ciaddr, self.yiaddr, self.siaddr, self.giaddr,
+                        # four IP addresses in packed form
+                        self.ciaddr.packed, self.yiaddr.packed, self.siaddr.packed, self.giaddr.packed,
+#                        iaddr_buf,
 
                         # 16 byte chaddr
                         self.chaddr,
@@ -507,7 +511,6 @@ class Packet:
         # vague general direction of DHCP
         op, = struct.unpack("B", buf[0:1])
         logger.info("op={:x} len={}".format(op, len(buf)))
-        assert op==2, (type(op),op)
         if op not in (BOOTP_REQUEST, BOOTP_REPLY):
             errmsg = ("op={:x} and is not Request or Reply".format(op))
             raise DHCPPacketError(errmsg)
@@ -544,6 +547,11 @@ class Packet:
          pkt.chaddr, pkt.sname, pkt.bootfile) = \
                     struct.unpack( ">BBBBLHH4s4s4s4s16s64s128s", buf[:basepkt_size] )
 
+        pkt.ciaddr = ipaddress.ip_address(socket.inet_ntoa(pkt.ciaddr))
+        pkt.yiaddr = ipaddress.ip_address(socket.inet_ntoa(pkt.yiaddr))
+        pkt.siaddr = ipaddress.ip_address(socket.inet_ntoa(pkt.siaddr))
+        pkt.giaddr = ipaddress.ip_address(socket.inet_ntoa(pkt.giaddr))
+
         pkt.options = options
         pkt.buf = buf
 
@@ -558,12 +566,14 @@ class Packet:
         except IndexError:
             raise DHCPPacketError("Invalid BOOTP opcode {:x}", self.op)
         
-        s = s + " xid:"+hex(self.xid) + \
-            " flags:"+hex(self.flags)  + \
-            " G:"+socket.inet_ntoa( self.giaddr ) + \
-            " C:"+socket.inet_ntoa( self.ciaddr ) + \
-            " Y:"+socket.inet_ntoa( self.yiaddr ) + \
-            " S:"+socket.inet_ntoa( self.siaddr ) 
+        s += "xid:{:x} flags:{:x} G:{} C:{} Y:{} S:{}".format(self.xid, self.flags, self.giaddr, self.ciaddr, self.yiaddr, self.siaddr)
+
+#        s = s + " xid:"+hex(self.xid) + \
+#            " flags:"+hex(self.flags)  + \
+#            " G:"+self.giaddr + \
+#            " C:"+self.ciaddr + \
+#            " Y:"+self.yiaddr + \
+#            " S:"+self.siaddr 
 
         chaddr = " chaddr:"
         i=0

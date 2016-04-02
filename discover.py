@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 
 # davep 07-Mar-2016 ;  DHCP Discovery
+#
+# Never never never broadcast any packets. Only unicasts to a specific known
+# server IP address. Best effort taken to not disrupt normal network operations.
 
 import sys
 import socket
 import struct
 import logging
+import ipaddress
 
 logger = logging.getLogger("dhcp.discover")
 
@@ -13,9 +17,9 @@ import dhcp
 
 #test_target = "127.0.0.1"
 #test_target = "172.19.9.238"
-test_target = "192.168.0.1"
+test_target = ipaddress.ip_address("192.168.0.1")
 
-my_ip = "192.168.0.5"
+my_ip = ipaddress.ip_address("192.168.0.5")
 
 my_chaddr = b"\x00\x40\x68\x00\x11\x22"
 #my_chaddr = b"\x80\xee\x73\x95\xcf\x61"
@@ -32,11 +36,13 @@ def run():
                         dhcp.network_time_server, dhcp.broadcast_address, dhcp.time_offset)
     pkt.set_option(dhcp.param_request_list, request_options)
     pkt.pack()
+    logger.debug("discovery packet=%s", pkt)
 #    pkt.add_option(dhcp.VendorClassID("∞ Python DHCP Test Client ∞"))
 
     # act as a gateway so as to be the least disruptive on the local network
     # (unicast *EVERYTHING*, no broadcast transmission ever!)
-    pkt.giaddr, = struct.unpack(">L",socket.inet_aton(my_ip))
+    pkt.giaddr = my_ip
+#    pkt.giaddr, = struct.unpack(">L",socket.inet_aton(my_ip))
 
     # requires server to broadcast responses (I will never broadcast)
 #    pkt.flags = dhcp.FLAGS_BROADCAST
@@ -48,10 +54,10 @@ def run():
     rx_sock = make_socket()
 
 #    sock.bind(("192.168.0.5", 0))
-    tx_sock.bind((my_ip, dhcp.CLIENT_PORT))
-    rx_sock.bind((my_ip, dhcp.SERVER_PORT))
+    tx_sock.bind((str(my_ip), dhcp.CLIENT_PORT))
+    rx_sock.bind((str(my_ip), dhcp.SERVER_PORT))
 
-    tx_sock.sendto(pkt.pack(), (test_target, dhcp.SERVER_PORT))
+    tx_sock.sendto(pkt.pack(), (str(test_target), dhcp.SERVER_PORT))
 
     buf, server = rx_sock.recvfrom(65535)
     logger.debug("recv bytes=%d from %s", len(buf), server)
