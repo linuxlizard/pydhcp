@@ -28,11 +28,24 @@ def ask_exit(signame, loop):
 	logger.info("got signal %s: exit", signame)
 	loop.stop()
 
+def dhcp_recv(sock, loop):
+	logger.info("dhcp_recv")
+
+	buf, server = sock.recvfrom(65535)
+#	buf = loop.sock_recv(sock, 65535)
+	logger.info("from server=%s len=%d", server, len(buf))
+	offer_pkt = dhcp.Packet.unpack(buf)
+	logger.info("from offer_pkt=%s", offer_pkt)
+	logger.info("opts=%s", offer_pkt.options)
+
 def make_socket():
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 	sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
 	sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, dev.encode())
 	sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, True)
+
+	# asyncio wants nonblocking
+	sock.setblocking(0)
 
 	return sock
 
@@ -61,6 +74,13 @@ def main():
 	for signame in ('SIGINT', 'SIGTERM'):
 		loop.add_signal_handler(getattr(signal, signame),
 								functools.partial(ask_exit, signame, loop))
+
+	loop.add_reader(tx_sock.fileno(), 
+					functools.partial(dhcp_recv, tx_sock, loop))
+
+	# TODO hook this into the loop somehow
+	ret = tx_sock.sendto(disco_pkt.pack(), ("255.255.255.255", dhcp.SERVER_PORT))
+	logger.info("sendto count=%d", ret)
 
 	# and away we go
 	try:
