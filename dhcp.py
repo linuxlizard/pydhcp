@@ -286,7 +286,6 @@ class Param_Request_Option( Hex_Option ) :
     parameter request list options."""
     def new(self,value=None) :
         # pack array of integers into a string
-        logger.debug("param_list value=%s", value)
         # expecting a list of integers or None (list can be empty)
         self.value = value
         if value :
