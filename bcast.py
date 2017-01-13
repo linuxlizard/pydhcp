@@ -12,6 +12,7 @@ import os
 import asyncio
 import signal
 import functools
+import subprocess
 
 logger = logging.getLogger("dhcp.bcast")
 
@@ -20,11 +21,12 @@ import dhcp
 # TODO get from command line
 dev="wlan1"
 
-# TODO get the dev's mac address 
-my_chaddr = b"\x00\xc0\xca\x84\xad\x18"
+# get the dev's mac address using "ip link $dev"
+IPCMD_PATH = "/sbin/ip"
 
 # from the python asyncio docs
 def ask_exit(signame, loop):
+	# TODO how do I cancel dhcp_discover() so I don't get the RuntimeError on ^C ?
 	logger.info("got signal %s: exit", signame)
 	loop.stop()
 
@@ -32,11 +34,20 @@ def dhcp_recv(sock, loop):
 	logger.info("dhcp_recv")
 
 	buf, server = sock.recvfrom(65535)
+	# TODO should I be using the loop.sock_recv() ?
 #	buf = loop.sock_recv(sock, 65535)
 	logger.info("from server=%s len=%d", server, len(buf))
 	offer_pkt = dhcp.Packet.unpack(buf)
 	logger.info("from offer_pkt=%s", offer_pkt)
 	logger.info("opts=%s", offer_pkt.options)
+
+@asyncio.coroutine
+def dhcp_discover(sock, disco_pkt):
+	buf = disco_pkt.pack()
+	while True:
+		ret = sock.sendto(buf, ("255.255.255.255", dhcp.SERVER_PORT))
+		logger.info("sendto ret=%d", ret)
+		yield from asyncio.sleep(30)
 
 def make_socket():
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -49,12 +60,17 @@ def make_socket():
 
 	return sock
 
+def get_macaddr(devname):
+	output = subprocess.check_output((IPCMD_PATH, "link", "show", dev), shell=False)
+	# let's hope ip(8) has stable output
+	fields = (output.split("\n".encode())[1]).split()
+	return fields[1]
+
 def main():
+	my_chaddr = get_macaddr(dev)
+
 	tx_sock = make_socket()
 	tx_sock.bind(('', dhcp.CLIENT_PORT))
-
-#	rx_sock = make_socket()
-#	rx_sock.bind(('', dhcp.SERVER_PORT))
 
 	# drop privs because why not
 	nobody = pwd.getpwnam("nobody")
@@ -78,32 +94,15 @@ def main():
 	loop.add_reader(tx_sock.fileno(), 
 					functools.partial(dhcp_recv, tx_sock, loop))
 
-	# TODO hook this into the loop somehow
-	ret = tx_sock.sendto(disco_pkt.pack(), ("255.255.255.255", dhcp.SERVER_PORT))
-	logger.info("sendto count=%d", ret)
+	disco_task = loop.create_task(dhcp_discover(tx_sock, disco_pkt))
 
 	# and away we go
 	try:
-		loop.run_forever()
+		loop.run_until_complete(disco_task)
 	finally:
 		loop.close()
 
-#	counter = 0
-#	while counter < 10:
-#		ret = tx_sock.sendto(disco_pkt.pack(), ("255.255.255.255", dhcp.SERVER_PORT))
-#		logger.info("sendto count=%d", ret)
-#
-#		buf, server = tx_sock.recvfrom(65535)
-#		logger.info("from server=%s len=%d", server, len(buf))
-#		offer_pkt = dhcp.Packet.unpack(buf)
-#		logger.info("from server=%s offer_pkt=%s", server ,offer_pkt)
-#		logger.info("opts=%s", offer_pkt.options)
-#
-#		time.sleep(1)
-#		counter += 1
-
 	tx_sock.close()
-#	rx_sock.close()
 
 if __name__=='__main__':
 	logging.basicConfig(level=logging.DEBUG)
