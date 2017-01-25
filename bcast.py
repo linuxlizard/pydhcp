@@ -19,16 +19,17 @@ logger = logging.getLogger("dhcp.bcast")
 import dhcp
 
 # TODO get from command line
-dev="wlan1"
+dev="wlan0"
 
 # get the dev's mac address using "ip link $dev"
 IPCMD_PATH = "/sbin/ip"
 
 # from the python asyncio docs
-def ask_exit(signame, loop):
+def ask_exit(signame, loop, disco_task):
 	# TODO how do I cancel dhcp_discover() so I don't get the RuntimeError on ^C ?
 	logger.info("got signal %s: exit", signame)
-	loop.stop()
+	disco_task.cancel()
+#	loop.stop()
 
 def dhcp_recv(sock, loop):
 	logger.info("dhcp_recv")
@@ -41,13 +42,12 @@ def dhcp_recv(sock, loop):
 	logger.info("from offer_pkt=%s", offer_pkt)
 	logger.info("opts=%s", offer_pkt.options)
 
-@asyncio.coroutine
-def dhcp_discover(sock, disco_pkt):
+async def dhcp_discover(sock, disco_pkt):
 	buf = disco_pkt.pack()
 	while True:
 		ret = sock.sendto(buf, ("255.255.255.255", dhcp.SERVER_PORT))
 		logger.info("sendto ret=%d", ret)
-		yield from asyncio.sleep(30)
+		await asyncio.sleep(10)
 
 def make_socket():
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -86,20 +86,23 @@ def main():
 	loop = asyncio.get_event_loop()
 	loop.set_debug(True)
 
-	# from the python docs
-	for signame in ('SIGINT', 'SIGTERM'):
-		loop.add_signal_handler(getattr(signal, signame),
-								functools.partial(ask_exit, signame, loop))
-
 	loop.add_reader(tx_sock.fileno(), 
 					functools.partial(dhcp_recv, tx_sock, loop))
 
 	disco_task = loop.create_task(dhcp_discover(tx_sock, disco_pkt))
 
+	# from the python docs
+	for signame in ('SIGINT', 'SIGTERM'):
+		loop.add_signal_handler(getattr(signal, signame),
+								functools.partial(ask_exit, signame, loop, disco_task))
+
 	# and away we go
 	try:
 		loop.run_until_complete(disco_task)
+	except asyncio.CancelledError:
+		logger.info("cancelled")
 	finally:
+		logger.info("hello from finally")
 		loop.close()
 
 	tx_sock.close()
