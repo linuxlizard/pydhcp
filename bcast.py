@@ -4,6 +4,7 @@
 #						Created to help find rogue DHCP servers on a subnet.
 #						Also an excuse to learn asyncio.
 
+import sys
 import logging
 import socket
 import pwd
@@ -17,9 +18,6 @@ import subprocess
 logger = logging.getLogger("dhcp.bcast")
 
 import dhcp
-
-# TODO get from command line
-dev="wlan0"
 
 # get the dev's mac address using "ip link $dev"
 IPCMD_PATH = "/sbin/ip"
@@ -49,27 +47,38 @@ async def dhcp_discover(sock, disco_pkt):
 		logger.info("sendto ret=%d", ret)
 		await asyncio.sleep(10)
 
-def make_socket():
+def make_socket(dev):
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 	sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
 	sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, dev.encode())
 	sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, True)
+
+	# "Starting with Linux 2.2, all IP header fields and options can be set
+	#  using IP socket options." raw(7)
+	# how do I set the source IP address to 0.0.0.0 ?
+	sock.setsockopt(socket.SOL_SOCKET, socket.SO_DONTROUTE, True)
+
+#	IP_FREEBIND=15
+#	ret = sock.setsockopt(socket.IPPROTO_IP, IP_FREEBIND, True)
+#	print(ret)
+#	sock.setsockopt(socket.IPPROTO_IP, socket.IP_FREEBIND, True)
 
 	# asyncio wants nonblocking
 	sock.setblocking(0)
 
 	return sock
 
-def get_macaddr(devname):
+def get_macaddr(dev):
 	output = subprocess.check_output((IPCMD_PATH, "link", "show", dev), shell=False)
 	# let's hope ip(8) has stable output
 	fields = (output.split("\n".encode())[1]).split()
 	return fields[1]
 
 def main():
+	dev = sys.argv[1]
 	my_chaddr = get_macaddr(dev)
 
-	tx_sock = make_socket()
+	tx_sock = make_socket(dev)
 	tx_sock.bind(('', dhcp.CLIENT_PORT))
 
 	# drop privs because why not
@@ -81,6 +90,7 @@ def main():
 	request_options = (dhcp.subnet_mask, dhcp.router, dhcp.domain_name_server, dhcp.domain_name,
 						dhcp.network_time_server, dhcp.broadcast_address, dhcp.time_offset)
 	disco_pkt.set_option(dhcp.param_request_list, request_options)
+	# request/require server to broadcast the response
 	disco_pkt.flags = dhcp.FLAGS_BROADCAST
 
 	loop = asyncio.get_event_loop()
